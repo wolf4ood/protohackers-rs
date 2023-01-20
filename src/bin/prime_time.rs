@@ -1,7 +1,7 @@
 use protohackers_rs::run_server;
 use serde::{Deserialize, Serialize};
 use tokio::{
-    io::{AsyncBufReadExt, AsyncRead, AsyncWrite, AsyncWriteExt, BufReader, BufWriter},
+    io::{AsyncBufReadExt, AsyncRead, AsyncWrite, AsyncWriteExt, BufReader},
     net::TcpStream,
 };
 use tracing::{debug, error};
@@ -20,10 +20,9 @@ async fn handle_client(mut stream: TcpStream) -> anyhow::Result<()> {
 
 async fn handle_client_internal(
     input_stream: impl AsyncRead + Unpin,
-    output_stream: impl AsyncWrite + Unpin,
+    mut output_stream: impl AsyncWrite + Unpin,
 ) -> anyhow::Result<()> {
     let input_stream = BufReader::new(input_stream);
-    let mut output_stream = BufWriter::new(output_stream);
     let mut lines = input_stream.lines();
     while let Some(line) = lines.next_line().await? {
         debug!("Got a line {}", line);
