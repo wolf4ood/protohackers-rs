@@ -88,7 +88,6 @@ impl Response {
 
 #[cfg(test)]
 mod tests {
-    use nom::AsBytes;
 
     use crate::handle_client_internal;
 
@@ -110,9 +109,11 @@ mod tests {
     #[tokio::test]
     async fn prime_time_test_ok() {
         let input = serde_json::json!({"method": "isPrime", "number": 3});
+        let input: Vec<u8> = serde_json::to_vec(&input).unwrap();
+
         let mut output: Vec<u8> = vec![];
 
-        handle_client_internal(serde_json::to_vec(&input).unwrap().as_bytes(), &mut output)
+        handle_client_internal(input.as_slice(), &mut output)
             .await
             .expect("Failed to handle");
 
