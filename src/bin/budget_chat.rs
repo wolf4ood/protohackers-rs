@@ -46,12 +46,16 @@ where
             return Ok(());
         }
     };
-    let mut handle = state.join(address, username.clone()).await;
+    let mut handle = state.join(address, username).await;
 
     loop {
         tokio::select! {
             Some(msg) = handle.receiver.recv() => {
-                sink.send(msg).await?;
+
+                if let Err(e) = sink.send(msg).await {
+                    error!("Error sending message {}",e);
+                    break;
+                }
             }
 
             result = stream.next() => match result {
@@ -59,6 +63,7 @@ where
                     handle.send_message(msg).await;
                 }
                 Some(Err(e)) => {
+
                     error!("Error reading messages {}",e);
                     break;
                 }
@@ -119,6 +124,10 @@ impl Username {
         }
         Ok(Username(input))
     }
+
+    pub fn inner_ref(&self) -> &String {
+        &self.0
+    }
 }
 
 #[derive(derive_more::Display, Clone, PartialEq, Debug)]
@@ -138,7 +147,7 @@ pub enum OutgoingMessage {
 }
 
 impl OutgoingMessage {
-    fn participants(&self, participants: &Vec<Username>) -> String {
+    fn participants(&self, participants: &[Username]) -> String {
         participants
             .iter()
             .map(|user| user.to_string())
@@ -243,7 +252,16 @@ impl Room {
 
 #[cfg(test)]
 mod budget_chat_tests {
-    use crate::{OutgoingMessage, PeerHandle, Room, Username};
+    use std::net::SocketAddr;
+
+    use futures::SinkExt;
+    use tokio::{
+        sync::mpsc::{self, Receiver, Sender},
+        task::JoinHandle,
+    };
+    use tokio_util::sync::PollSender;
+
+    use crate::{handle_client_internal, OutgoingMessage, PeerHandle, Room, Username};
 
     async fn check_message(handle: &mut PeerHandle, msg: OutgoingMessage) {
         assert_eq!(handle.receiver.recv().await.unwrap(), msg);
@@ -292,5 +310,112 @@ mod budget_chat_tests {
 
         // bob should receive alice left notification
         check_message(&mut bob, OutgoingMessage::Leave(alice_username.clone())).await;
+    }
+
+    struct PeerTest {
+        sink_receiver: Receiver<OutgoingMessage>,
+        stream_sender: Option<Sender<anyhow::Result<String>>>,
+        handle: JoinHandle<anyhow::Result<()>>,
+    }
+
+    impl PeerTest {
+        async fn send(&mut self, message: &str) {
+            self.stream_sender
+                .as_ref()
+                .unwrap()
+                .send(Ok(message.to_string()))
+                .await
+                .unwrap();
+        }
+
+        async fn leave(mut self) {
+            let stream = self.stream_sender.take();
+            drop(stream);
+
+            self.handle.await.unwrap().unwrap()
+        }
+
+        async fn check_message(&mut self, msg: OutgoingMessage) {
+            assert_eq!(self.sink_receiver.recv().await.unwrap(), msg);
+        }
+    }
+
+    async fn connect(room: Room, addr: &str) -> PeerTest {
+        let (sink_tx, sink_rx) = mpsc::channel(100);
+        let (stream_tx, mut stream_rx) = mpsc::channel(100);
+
+        let address: SocketAddr = addr.parse().unwrap();
+
+        let stream = async_stream::stream! {
+            while let Some(message) = stream_rx.recv().await {
+                yield message
+            }
+        };
+
+        let handle = tokio::spawn(async move {
+            handle_client_internal(
+                room,
+                address,
+                PollSender::new(sink_tx).sink_map_err(anyhow::Error::from),
+                Box::pin(stream),
+            )
+            .await
+        });
+
+        PeerTest {
+            sink_receiver: sink_rx,
+            stream_sender: Some(stream_tx),
+            handle,
+        }
+    }
+
+    #[tokio::test]
+    async fn example_session_test() {
+        let room = Room::new();
+
+        let alice_username = Username::parse("alice".to_string()).unwrap();
+        let bob_username = Username::parse("bob".to_string()).unwrap();
+
+        let mut alice = connect(room.clone(), "0.0.0.0:10").await;
+        alice.check_message(OutgoingMessage::Welcome).await;
+
+        alice.send(&alice_username.inner_ref()).await;
+        alice
+            .check_message(OutgoingMessage::Participants(vec![]))
+            .await;
+
+        let mut bob = connect(room.clone(), "0.0.0.0:11").await;
+        bob.check_message(OutgoingMessage::Welcome).await;
+
+        bob.send(&bob_username.inner_ref()).await;
+        bob.check_message(OutgoingMessage::Participants(vec![alice_username.clone()]))
+            .await;
+
+        alice
+            .check_message(OutgoingMessage::Join(bob_username.clone()))
+            .await;
+
+        alice.send("Hi bob!").await;
+
+        bob.check_message(OutgoingMessage::Chat {
+            msg: "Hi bob!".to_string(),
+            from: alice_username.clone(),
+        })
+        .await;
+
+        bob.send("Hi alice!").await;
+
+        alice
+            .check_message(OutgoingMessage::Chat {
+                msg: "Hi alice!".to_string(),
+                from: bob_username.clone(),
+            })
+            .await;
+
+        bob.leave().await;
+
+        alice
+            .check_message(OutgoingMessage::Leave(bob_username))
+            .await;
     }
 }
