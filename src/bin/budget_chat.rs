@@ -116,10 +116,10 @@ pub struct Username(String);
 
 impl Username {
     pub fn parse(input: String) -> anyhow::Result<Username> {
-        if input.trim().is_empty() {
+        if input.is_empty() {
             anyhow::bail!("Name should be at least 1 character")
         }
-        if input.trim().chars().any(|c| !c.is_alphanumeric()) {
+        if input.chars().any(|c| !c.is_alphanumeric()) {
             anyhow::bail!("Name should contains only alphanumeric characters")
         }
         Ok(Username(input))
@@ -156,19 +156,19 @@ impl OutgoingMessage {
     }
 }
 
-pub struct Peer {
+pub struct User {
     username: Username,
     sender: mpsc::UnboundedSender<OutgoingMessage>,
 }
 
-pub struct PeerHandle {
+pub struct UserHandle {
     username: Username,
     address: SocketAddr,
     receiver: mpsc::UnboundedReceiver<OutgoingMessage>,
     room: Room,
 }
 
-impl PeerHandle {
+impl UserHandle {
     pub async fn send_message(&self, msg: String) {
         self.room
             .broadcast(
@@ -187,20 +187,21 @@ impl PeerHandle {
 }
 
 #[derive(Clone)]
-pub struct Room(Arc<Mutex<HashMap<SocketAddr, Peer>>>);
+pub struct Room(Arc<Mutex<HashMap<SocketAddr, User>>>);
 
 impl Room {
     pub fn new() -> Room {
         Room(Arc::new(Mutex::new(HashMap::new())))
     }
 
-    pub async fn join(&self, addr: SocketAddr, username: Username) -> PeerHandle {
-        let mut users = self.0.lock().await;
+    pub async fn join(&self, addr: SocketAddr, username: Username) -> UserHandle {
         let (sender, receiver) = mpsc::unbounded_channel();
+
+        let mut users = self.0.lock().await;
 
         let names = users
             .iter()
-            .map(|(_, peer)| peer.username.clone())
+            .map(|(_, user)| user.username.clone())
             .collect::<Vec<Username>>();
 
         let _ = sender.send(OutgoingMessage::Participants(names));
@@ -209,13 +210,13 @@ impl Room {
             .await;
         users.insert(
             addr,
-            Peer {
+            User {
                 username: username.clone(),
                 sender,
             },
         );
 
-        PeerHandle {
+        UserHandle {
             username,
             receiver,
             room: self.clone(),
@@ -235,11 +236,11 @@ impl Room {
         &self,
         addr: &SocketAddr,
         msg: OutgoingMessage,
-        users: &mut HashMap<SocketAddr, Peer>,
+        users: &mut HashMap<SocketAddr, User>,
     ) {
-        for (peer_addr, peer) in users.iter_mut() {
-            if addr != peer_addr {
-                let _ = peer.sender.send(msg.clone());
+        for (user_addr, user) in users.iter_mut() {
+            if addr != user_addr {
+                let _ = user.sender.send(msg.clone());
             }
         }
     }
@@ -261,9 +262,9 @@ mod budget_chat_tests {
     };
     use tokio_util::sync::PollSender;
 
-    use crate::{handle_client_internal, OutgoingMessage, PeerHandle, Room, Username};
+    use crate::{handle_client_internal, OutgoingMessage, Room, UserHandle, Username};
 
-    async fn check_message(handle: &mut PeerHandle, msg: OutgoingMessage) {
+    async fn check_message(handle: &mut UserHandle, msg: OutgoingMessage) {
         assert_eq!(handle.receiver.recv().await.unwrap(), msg);
     }
 
@@ -312,13 +313,13 @@ mod budget_chat_tests {
         check_message(&mut bob, OutgoingMessage::Leave(alice_username.clone())).await;
     }
 
-    struct PeerTest {
+    struct UserTest {
         sink_receiver: Receiver<OutgoingMessage>,
         stream_sender: Option<Sender<anyhow::Result<String>>>,
         handle: JoinHandle<anyhow::Result<()>>,
     }
 
-    impl PeerTest {
+    impl UserTest {
         async fn send(&mut self, message: &str) {
             self.stream_sender
                 .as_ref()
@@ -340,7 +341,7 @@ mod budget_chat_tests {
         }
     }
 
-    async fn connect(room: Room, addr: &str) -> PeerTest {
+    async fn connect(room: Room, addr: &str) -> UserTest {
         let (sink_tx, sink_rx) = mpsc::channel(100);
         let (stream_tx, mut stream_rx) = mpsc::channel(100);
 
@@ -362,7 +363,7 @@ mod budget_chat_tests {
             .await
         });
 
-        PeerTest {
+        UserTest {
             sink_receiver: sink_rx,
             stream_sender: Some(stream_tx),
             handle,
