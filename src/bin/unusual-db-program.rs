@@ -16,11 +16,10 @@ async fn main() -> anyhow::Result<()> {
     let socket = UdpSocket::bind("0.0.0.0:8001").await?;
 
     let mut store = HashMap::new();
+    let mut buff = [0; 1000];
 
     store.insert("version".to_string(), VERSION.to_string());
     loop {
-        let mut buff = [0; 1000];
-
         let (read, addr) = socket.recv_from(&mut buff).await?;
 
         info!("Received packet");
